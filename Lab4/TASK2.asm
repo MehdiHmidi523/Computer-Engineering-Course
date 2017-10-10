@@ -1,117 +1,179 @@
-.include "m2560def.inc"
+; increase and decrease the duty cycle using timer0
 
-.def percent        = r19
-.def output         = r16
-.def temp           = r21
-.def lighttime      = r22
-.def valueh         = r25
-.def valuel         = r24
+.include "m2560def.inc" ;our device include file
 
-.equ time           = 5000
+.ORG 0
+	rjmp start
+	
+.ORG OVF0addr
+	jmp timer0_int
+	
+;------------- inturrupts
+.ORG INT0addr
+	jmp interrupt_1
+.ORG INT1addr
+	jmp interrupt_2
+;---------------
 
-.cseg
-.org 0x0000
-    rjmp    start
 
-.org ovf1addr
-    jmp     timer1_int
+.org 0x50
+.def temp= r16
+.equ time =100
+.def pwm= r19
+.def value= r22
+.equ fivepercent=0xc
+.equ delay_lab =180/4
 
-.org int1addr
-    jmp     increase
-
-.org int2addr
-    jmp     decrease
-
-.org 0x72
 start:
-    ldi     lighttime, 10
-    ldi     valueh, high(time)  
-    com     valueh
-    ldi     valuel, low(time)   
-    com     valuel
+	ldi r16, HIGH(RAMEND) ; R16 = high part of RAMEND address
+	out sph,r16 		; SPH = high part of RAMEND address
+	ldi r16, low(RAMEND) ; R16 = low part of RAMEND address
+	out spl,r16 		; SPL = low part of RAMEND address
 
-                                ; initialize sp, stack pointer
-    ldi     temp, low(RAMEND)
-    out     spl, temp
-    ldi     temp, high(RAMEND)  
-    out     sph, temp
+	ldi temp,(1<<COM0A1)|(1<<COM0B1)|(1<<WGM00)|(1<<WGM01)
+	out TCCR0A,temp
 
-                                ; prescaler
-    ldi     output, 0x03            
-    out     DDRB, output
+	ldi temp, (5<<CS00)|(0<<WGM02) ; prescaler value to TCCR0
+	out TCCR0B, temp ; CS2 - CS2 = 101, osc.clock / 1024
 
-                                ; time for timer 0x05 -> 1024
-    ldi     temp, 0x03          
-    sts     TCCR1B, temp
-    ldi     temp, (1<<TOIE1)    
-    sts     TIMSK1, temp
+	ldi temp, (1<<TOIE0) ; Timer 0 enable flag, TOIE0
+	sts TIMSK0, temp 	; to register TIMSK
 
-    ldi     temp, 0b00000110        
-    out     EIMSK, temp         ; int0 and int1 and (perhaps also int2) enabled
-    ldi     temp, 0b00101000        
-    sts     EICRA, temp         ; int1 falling edge, int0 rising edge
+	ldi temp, time 		; starting value for counter
+	out TCNT0, temp 	; counter register
 
-    sts     TCNT1H, valueh
-    sts     TCNT1L, valuel
-    sei
+	ldi temp,0
+	out OCR0A,temp
 
-loop:
-    nop
-    rjmp    loop
+	ldi value,fivepercent
 
-timer1_int:
-    cpi     output, 0x01
-    brne    darktime            ;the light was off and should be lit with light time
-    mov     percent, lighttime
-    ldi     output, 0x00
-    rjmp    set_time
-darktime:                       ;the light was on and should be off now with darktime
-    ldi     percent, 20
-    sub     percent, lighttime
-    ldi     output, 0x01
+;--------------
+;sitting r16 as an input and activating switch 1
+	ldi r16,0b11111100
+	out ddrd,r16
+	
+	ser r16
+	out ddrb,r16
 
-set_time:                       ; set time to percent * maxTime
-    ldi     valuel, low(0)
-    ldi     valueh, high(0)     ;setting it to zero
-    cpi     percent, 0
-    brne    settime_loop        ;if zero then it should not continue to the loop
-    rjmp    timeroutput
+;initiate the instructions
 
-set_time_loop:
-    sbiw    valuel, 60
-    sbiw valuel, 60
-    sbiw    valuel, 60
-    sbiw    valuel, 60
-    sbiw    valuel, 60
-    sbiw    valuel, 60
-    sbiw    valuel, 10          ;50 -> 5% off time (5000)
+;global
+	ldi r16,0b11111111
+	out portb,r16
 
-    dec     percent
-    cpi     percent, 0
-    brne    set_time_loop
+;activating the interrupt
 
-timeroutput:
-    out     DDRB, output
+	ldi r16,0b00000011
+	out EIMSK,r16
 
-    sts     TCNT1H, valueh
-    sts     TCNT1L, valuel
+	ldi r16,0b00001111
+	sts EICRA,r16
 
-    reti
+	sei 				; enable global interrupt
+	ldi r17,0xff
+	out ddrb,r17
+	ldi r17,0b10111111
+
+;------ Main Loop -----------	
+ms_10:
+	out portb,r17
+
+	rjmp ms_10 			; main loop
+
+;;;-------------- timer loop
+timer0_int:
+	push temp 			; timer interrupt routine
+	in temp, SREG 		; save SREG on stack
+	push temp
+; additional code to create the square output
+	ldi temp, time 		; starting value for counter
+;out OCR0A,r16
+	out TCNT0, temp 	; counter register
+
+;-----------------
+;on and off after 50 sec
+	inc r20
+
+	cpi r20,0x03
+	brne exit
+
+checkifonoroff:
+	cpi r21,0x00
+	breq off
+
+	cpi r21,0xff
+	breq on
+	
+off:
+	ldi r21,0xff
+	ldi r17,0b11111111
+	out portb,r17
+
+	ldi r20,0x00
+	jmp exit
+	
+on:
+	ldi r21,0x00
+	ldi r17,0b10111111
+	out portb,r17
+
+	ldi r20,0x00
+	jmp exit
+	
+exit:
+
+	pop temp 			; restore SREG
+	out SREG, temp
+	pop temp 			; restore register
+	reti 				; return from interrupt
 
 
-increase:                       ; 20 is max => 5% (percent / 20) p=0.05
-    cpi     lighttime, 20   
-    breq    afterinc            ; if 'higher' then 20
 
-    inc     lighttime
-afterinc:
-    reti
+;---------------
+interrupt_1: 			;increase
+	push r16
+	in r16,SREG
+	push r16
 
+	in r16, OCR0A
+	add r16,value
+	out OCR0A,r16
 
-decrease:
-    cpi     lighttime, 0    
-    breq    afterdec            ; if 'below' then 0
+	cpi r16,0xFF
+	breq reset
+	
+cleared:
+	pop r16
 
-    dec     lighttime
-afterdec:
-    reti
+	out SREG,r16
+	pop r16
+	reti
+	
+;---------------
+interrupt_2: 			;decrease
+	push r16
+	in r16,SREG
+	push r16
+
+	in r16, OCR0A
+	sub r16,value
+	out OCR0A,r16
+
+	cpi r16,0x00
+	breq reset2
+	
+cleared2:
+	pop r16
+
+	out SREG,r16
+	pop r16
+	reti
+
+reset:
+	ldi pwm,0x00
+	rjmp cleared
+
+reset2:
+	ldi pwm,0xff
+	rjmp cleared2
+;-----------------------------
